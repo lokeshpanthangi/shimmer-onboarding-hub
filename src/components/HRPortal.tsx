@@ -48,7 +48,7 @@ const HRPortal = () => {
     handleFiles(selectedFiles);
   };
 
-  const handleFiles = (fileList: File[]) => {
+  const handleFiles = async (fileList: File[]) => {
     const acceptedTypes = [
       'application/pdf',
       'application/msword', 
@@ -66,33 +66,83 @@ const HRPortal = () => {
       });
     }
 
-    validFiles.forEach(file => {
-      const newFile: UploadedFile = {
-        id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
-        name: file.name,
-        size: formatFileSize(file.size),
-        type: file.type,
-        status: 'uploading'
-      };
+    if (validFiles.length === 0) return;
 
-      setFiles(prev => [...prev, newFile]);
+    // Add files to state immediately
+    const newFiles = validFiles.map(file => ({
+      id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
+      name: file.name,
+      size: formatFileSize(file.size),
+      type: file.type,
+      status: 'uploading' as const
+    }));
 
-      // Simulate upload process
-      setTimeout(() => {
+    setFiles(prev => [...prev, ...newFiles]);
+
+    // Upload files to backend
+    await uploadToBackend(validFiles, newFiles);
+  };
+
+  const uploadToBackend = async (files: File[], fileStates: UploadedFile[]) => {
+    try {
+      setIsUploading(true);
+      
+      const formData = new FormData();
+      files.forEach(file => {
+        formData.append('files', file);
+      });
+      formData.append('department', 'hr');
+
+      const response = await fetch('http://localhost:3001/api/upload', {
+        method: 'POST',
+        body: formData
+      });
+
+      const result = await response.json();
+
+      if (response.ok) {
+        // Update file statuses based on results
         setFiles(prev => 
-          prev.map(f => 
-            f.id === newFile.id 
-              ? { ...f, status: Math.random() > 0.1 ? 'success' : 'error' as const }
-              : f
-          )
+          prev.map(f => {
+            const fileResult = result.results.find((r: any) => r.filename === f.name);
+            if (fileResult) {
+              return { ...f, status: fileResult.status as 'success' | 'error' };
+            }
+            return f;
+          })
         );
-      }, 2000 + Math.random() * 2000);
-    });
-
-    toast({
-      title: "Files uploaded",
-      description: `${validFiles.length} file(s) are being processed.`,
-    });
+        
+        const successCount = result.summary.successful;
+        const failedCount = result.summary.failed;
+        
+        toast({
+          title: "Upload completed",
+          description: `${successCount} file(s) processed successfully${failedCount > 0 ? `, ${failedCount} failed` : ''}.`,
+          variant: failedCount > 0 ? "destructive" : "default",
+        });
+      } else {
+        throw new Error(result.error || 'Upload failed');
+      }
+    } catch (error) {
+      console.error('Upload error:', error);
+      
+      // Mark all files as error
+      setFiles(prev => 
+        prev.map(f => 
+          fileStates.some(fs => fs.id === f.id) 
+            ? { ...f, status: 'error' as const }
+            : f
+        )
+      );
+      
+      toast({
+        title: "Upload failed",
+        description: error instanceof Error ? error.message : 'Failed to upload files',
+        variant: "destructive",
+      });
+    } finally {
+      setIsUploading(false);
+    }
   };
 
   const removeFile = (fileId: string) => {

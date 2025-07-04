@@ -1,27 +1,40 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, MessageCircle, Clock, Shield, Calendar, AlertTriangle, Briefcase } from 'lucide-react';
+import { useToast } from '@/hooks/use-toast';
 
 interface Message {
   id: string;
   text: string;
   sender: 'user' | 'bot';
   timestamp: Date;
+  sources?: Array<{
+    filename: string;
+    score: number;
+    department: string;
+  }>;
 }
 
+const API_BASE_URL = 'http://localhost:3001/api';
+
 const EmployeePortal = () => {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: '1',
-      text: "Hello! I'm your HR Assistant. I'm here to help you with company policies, benefits, and any questions you might have. How can I assist you today?",
-      sender: 'bot',
-      timestamp: new Date()
-    }
-  ]);
+  const { toast } = useToast();
+  const [messages, setMessages] = useState<Message[]>([]);
   const [inputMessage, setInputMessage] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [selectedDepartment, setSelectedDepartment] = useState('all');
+  const [conversationHistory, setConversationHistory] = useState<Array<{role: string, content: string}>>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const departments = [
+    { value: 'all', label: 'All Departments' },
+    { value: 'hr', label: 'Human Resources' },
+    { value: 'it', label: 'Information Technology' },
+    { value: 'finance', label: 'Finance' },
+    { value: 'operations', label: 'Operations' },
+    { value: 'legal', label: 'Legal' }
+  ];
 
   const quickQuestions = [
     { text: "Company Holidays", icon: Calendar, color: "from-blue-400 to-purple-500" },
@@ -39,31 +52,38 @@ const EmployeePortal = () => {
     scrollToBottom();
   }, [messages]);
 
-  const generateBotResponse = (userMessage: string): string => {
-    const lowerMessage = userMessage.toLowerCase();
-    
-    if (lowerMessage.includes('holiday') || lowerMessage.includes('vacation')) {
-      return "Our company observes all federal holidays including New Year's Day, Memorial Day, Independence Day, Labor Day, Thanksgiving, and Christmas. You can find the complete calendar in your employee portal under 'Company Calendar'. We also offer floating holidays that you can use at your discretion.";
-    }
-    
-    if (lowerMessage.includes('leave') || lowerMessage.includes('time off')) {
-      return "To request time off, please use the employee self-service portal. Go to 'My Time' section and submit your request at least 2 weeks in advance for vacation days. Sick leave can be requested with 24-hour notice when possible. Your manager will receive an automatic notification for approval.";
-    }
-    
-    if (lowerMessage.includes('benefit') || lowerMessage.includes('health') || lowerMessage.includes('insurance')) {
-      return "We offer comprehensive health benefits including medical, dental, and vision insurance. You also have access to a 401(k) plan with company matching, life insurance, and wellness programs. Open enrollment is held annually in November. Contact HR for specific details about your coverage.";
-    }
-    
-    if (lowerMessage.includes('dress code') || lowerMessage.includes('attire')) {
-      return "Our dress code is business casual. This means collared shirts, slacks or khakis, and closed-toe shoes for men. For women, this includes blouses, dress pants, skirts, or dresses that are knee-length or longer. Fridays are casual dress days. Please avoid shorts, flip-flops, or overly casual attire.";
-    }
-    
-    if (lowerMessage.includes('issue') || lowerMessage.includes('problem') || lowerMessage.includes('report')) {
-      return "If you need to report an issue, you can: 1) Contact your direct supervisor, 2) Reach out to HR directly via email or phone, 3) Use our anonymous reporting hotline at 1-800-ETHICS, or 4) Submit a confidential report through the employee portal. We take all concerns seriously and investigate promptly.";
-    }
-    
-    return "Thank you for your question! I'd be happy to help you with HR-related topics like company policies, benefits, time off requests, or workplace procedures. Could you please provide more specific details about what you'd like to know?";
-  };
+  const sendMessageToAPI = async (message: string): Promise<{ response: string; sources?: Array<{filename: string; score: number; department: string}> }> => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message,
+          department: selectedDepartment === 'all' ? undefined : selectedDepartment,
+          conversationHistory: conversationHistory.slice(-10), // Keep last 10 messages for context
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        if (response.status === 404) {
+          throw new Error(errorData.message || 'No relevant information found in company documents');
+        }
+        throw new Error(errorData.message || `HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      return {
+        response: data.response,
+        sources: data.sources || []
+      };
+    } catch (error) {
+      console.error('Error calling chat API:', error);
+      throw error;
+     }
+   };
 
   const sendMessage = async (messageText?: string) => {
     const text = messageText || inputMessage.trim();
@@ -80,19 +100,57 @@ const EmployeePortal = () => {
     setInputMessage('');
     setIsTyping(true);
 
-    // Simulate typing delay
-    setTimeout(() => {
+    // Update conversation history
+    const newHistory = [...conversationHistory, { role: 'user', content: text }];
+    setConversationHistory(newHistory);
+
+    try {
+      const apiResponse = await sendMessageToAPI(text);
+      
       const botResponse: Message = {
         id: (Date.now() + 1).toString(),
-        text: generateBotResponse(text),
+        text: apiResponse.response,
+        sender: 'bot',
+        timestamp: new Date(),
+        sources: apiResponse.sources
+      };
+      
+      setMessages(prev => [...prev, botResponse]);
+      
+      // Update conversation history with bot response
+      setConversationHistory(prev => [...prev, { role: 'assistant', content: apiResponse.response }]);
+      
+      // Show success toast if sources were found
+      if (apiResponse.sources && apiResponse.sources.length > 0) {
+        toast({
+          title: "Sources Found",
+          description: `Found ${apiResponse.sources.length} relevant document(s) to answer your question.`,
+        });
+      }
+      
+    } catch (error) {
+      console.error('Error sending message:', error);
+      
+      const errorResponse: Message = {
+        id: (Date.now() + 1).toString(),
+        text: error.message || "Unable to process your request. Please ensure the backend server is running and try again.",
         sender: 'bot',
         timestamp: new Date()
       };
       
-      setMessages(prev => [...prev, botResponse]);
-      setIsTyping(false);
-    }, 1000 + Math.random() * 2000);
-  };
+      setMessages(prev => [...prev, errorResponse]);
+      
+      const isNoDocumentsError = error.message?.includes('No relevant information found') || error.message?.includes('company documents');
+      
+      toast({
+        title: isNoDocumentsError ? "No Information Found" : "Connection Error",
+        description: isNoDocumentsError ? "No relevant company documents found for your question." : "Unable to connect to the HR knowledge base. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+       setIsTyping(false);
+     }
+   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -124,6 +182,22 @@ const EmployeePortal = () => {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Department Filter */}
+      <div className="bg-white/10 backdrop-blur-md rounded-3xl p-6 border border-white/20 shadow-2xl">
+        <h3 className="text-lg font-semibold text-white mb-4">Department Filter</h3>
+        <select
+          value={selectedDepartment}
+          onChange={(e) => setSelectedDepartment(e.target.value)}
+          className="w-full bg-white/10 border border-white/20 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-white/30 backdrop-blur-sm"
+        >
+          {departments.map((dept) => (
+            <option key={dept.value} value={dept.value} className="bg-gray-800 text-white">
+              {dept.label}
+            </option>
+          ))}
+        </select>
       </div>
 
       {/* Quick Questions */}
@@ -166,6 +240,22 @@ const EmployeePortal = () => {
                 } backdrop-blur-sm shadow-lg`}
               >
                 <p className="text-sm leading-relaxed">{message.text}</p>
+                
+                {/* Show sources for bot messages */}
+                {message.sender === 'bot' && message.sources && message.sources.length > 0 && (
+                  <div className="mt-3 pt-3 border-t border-white/20">
+                    <p className="text-xs text-white/70 mb-2">Sources:</p>
+                    <div className="space-y-1">
+                      {message.sources.map((source, idx) => (
+                        <div key={idx} className="text-xs text-white/60 flex items-center justify-between">
+                          <span>📄 {source.filename}</span>
+                          <span className="text-green-300">{Math.round(source.score * 100)}% match</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                
                 <p className={`text-xs mt-2 ${
                   message.sender === 'user' ? 'text-white/70' : 'text-white/50'
                 }`}>
